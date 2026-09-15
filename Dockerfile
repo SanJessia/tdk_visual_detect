@@ -1,31 +1,43 @@
-FROM ubuntu:22.04
+# 假設你原本的基底是 ros:humble (如果不同，請保留你原本的 FROM 第一行)
+FROM osrf/ros:humble-desktop
 
-# 避免安裝過程出現互動視窗，導致建置卡住
+# 設定環境變數，避免安裝過程中卡在時區或互動式選項
 ENV DEBIAN_FRONTEND=noninteractive
-ENV LANG C.UTF-8
-ENV LC_ALL C.UTF-8
 
-# 分兩階段安裝：先裝環境設定工具，再裝 ROS
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    curl \
-    gnupg2 \
-    lsb-release \
-    ca-certificates \
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    python3-dev \
+    build-essential \
+    wget \
+    tar \
+    gzip \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    fontconfig \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
-# 加入 ROS 2 金鑰與儲存庫
-RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
-
-# 安裝 ROS 2
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ros-humble-desktop \
-    python3-colcon-common-extensions \
+RUN apt-get update && apt-get install -y \
+    ros-humble-realsense2-camera \
+    ros-humble-cv-bridge \
+    ros-humble-message-filters \
     && rm -rf /var/lib/apt/lists/*
 
-# 自動 source 環境
+RUN pip3 install --no-cache-dir --upgrade pip
+
+RUN pip3 install --no-cache-dir --ignore-installed sympy
+RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip3 install --no-cache-dir ultralytics
+RUN pip3 install --no-cache-dir pyrealsense2 pyserial
+
+RUN pip3 install --no-cache-dir "numpy==1.26.4" "opencv-python==4.9.0.80"
+
+WORKDIR /workspace
+
 RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
-# 在 Dockerfile 中加入
-RUN apt-get update && apt-get install -y python3-rosdep \
-    && rosdep init && rosdep update
+RUN echo "if [ -f /workspace/install/setup.bash ]; then source /workspace/install/setup.bash; fi" >> ~/.bashrc
+
+CMD ["/bin/bash"]

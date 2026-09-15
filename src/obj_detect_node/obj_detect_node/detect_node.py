@@ -1,13 +1,16 @@
 import math
 import cv2
-from geometry_msgs.msg import Point
-from tdk_interfaces.msg import TargetInfo
-
 import numpy as np
-import pyrealsense2 as rs
 import rclpy
 from rclpy.node import Node
 from ultralytics import YOLO
+
+# 🌟 引入 ROS 2 影像傳輸與橋接套件 (取代 pyrealsense2)
+from sensor_msgs.msg import Image, CameraInfo
+from cv_bridge import CvBridge
+import message_filters
+
+from tdk_interfaces.msg import TargetInfo
 
 class ObjDetectNode(Node):
   def __init__(self):
@@ -17,7 +20,7 @@ class ObjDetectNode(Node):
     # --- 省資源開關設定 ---
     self.enable_debug_view = True    # TODO: 實際上場比賽時，請改為 False 關閉畫面顯示
     
-    # 參數設定
+    # 參數設定 (完全保留你的數值)
     self.camera_pitch_deg = 66.0
     self.camera_height_m = 0.704
     self.robo_offset_x = 0.1753
@@ -35,26 +38,35 @@ class ObjDetectNode(Node):
     self.get_logger().info('Loading YOLO model...')
     self.model = YOLO('/workspace/weights/best.pt')
 
-    # 初始化 RealSense
-    self.pipeline = rs.pipeline()
-    self.config = rs.config()
-    self.config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-    self.config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-    self.profile = self.pipeline.start(self.config)
-    self.align = rs.align(rs.stream.color)
+    # 🌟 初始化 OpenCV 影像橋接器
+    self.bridge = CvBridge()
+    self.intrinsics = None  # 用來存相機內部參數
     
-    if self.enable_debug_view:
-        self.colorizer = rs.colorizer()
+    # =========================================================
+    # 🌟 建立訂閱者 (Subscriber) 架構，取代原本的 pyrealsense2
+    # =========================================================
+    # 1. 訂閱相機參數 (為了計算 3D 座標)
+    self.info_sub = self.create_subscription(
+        CameraInfo, '/camera/camera/color/camera_info', self.info_callback, 10)
+    
+    # 2. 訂閱彩色與深度影像，並使用「時間同步器」確保兩張畫面是同一瞬間拍的
+    self.color_sub = message_filters.Subscriber(self, Image, '/camera/camera/color/image_raw')
+    self.depth_sub = message_filters.Subscriber(self, Image, '/camera/camera/aligned_depth_to_color/image_raw')
+    
+    # queue_size=5, slop=0.1 代表容忍 0.1 秒內的時間差
+    self.ts = message_filters.ApproximateTimeSynchronizer(
+        [self.color_sub, self.depth_sub], queue_size=5, slop=0.1)
+    self.ts.registerCallback(self.sync_callback)
+    
+    self.get_logger().info('YOLO 辨識節點已啟動 (解耦訂閱版)，等待相機畫面...')
 
-    color_profile = self.profile.get_stream(rs.stream.color).as_video_stream_profile()
-    self.intrinsics = color_profile.get_intrinsics()
+  def info_callback(self, msg):
+    # 只抓取一次相機參數就存起來
+    if self.intrinsics is None:
+        self.intrinsics = msg
+        self.get_logger().info('成功獲取 RealSense 內部參數！')
 
-    # 優化：將頻率降至 15Hz (0.066秒)，對機器人導航已足夠，可省下一半算力
-    self.timer = self.create_timer(0.066, self.timer_callback)
-    self.get_logger().info('ObjDetectNode started. (Optimized Version)')
-
-  def calculate_camera_ground_position(self, p_cam):
-    Xc, Yc, Zc = p_cam
+  def calculate_camera_ground_position(self, Xc, Yc, Zc):
     pitch_rad = math.radians(self.camera_pitch_deg)
     cos_p = math.cos(pitch_rad)
     sin_p = math.sin(pitch_rad)
@@ -63,39 +75,15 @@ class ObjDetectNode(Node):
     target_z = self.camera_height_m - (Zc * sin_p + Yc * cos_p)
     return ground_x, ground_y, target_z
 
-  def timer_callback(self):
-    # 🌟 關鍵修正 1：用 while 迴圈把舊畫面全部抽乾，只保留「最新」的一幀
-    latest_frames = None
-    while True:
-      f = self.pipeline.poll_for_frames()
-      if not f:
-        break
-      latest_frames = f
+  def sync_callback(self, color_msg, depth_msg):
+    # 如果還沒拿到相機參數，先跳過
+    if self.intrinsics is None:
+        return
 
-    # 如果連最新的畫面都沒有，就保持視窗刷新然後退出
-    if not latest_frames:
-      if self.enable_debug_view:
-        cv2.waitKey(1)
-      return
-
-    frames = latest_frames
-
-    # 取出彩色影像
-    color_frame = frames.get_color_frame()
-    if not color_frame:
-      if self.enable_debug_view:
-        cv2.waitKey(1)
-      return
-
-    color_image = np.asanyarray(color_frame.get_data())
-
-    # 🌟 關鍵修正 2：在 YOLO 運算前先刷新一次視窗，防止作業系統誤判程式當機
-    if self.enable_debug_view:
-        cv2.waitKey(1)
+    color_image = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding='bgr8')
+    depth_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='16UC1')
 
     # ================= 以下維持你原本的 YOLO 執行推論代碼 =================
-    # YOLO 執行推論
-
     results = self.model(color_image, verbose=False, imgsz=320)
     boxes = results[0].boxes
     
@@ -105,14 +93,13 @@ class ObjDetectNode(Node):
             cv2.waitKey(1)
         return
 
-    # 將預測結果照信心度 (Confidence) 由高到低排序，確保我們優先處理最確定的目標
     sorted_boxes = sorted(boxes, key=lambda b: float(b.conf[0]), reverse=True)
     
     target_found = False
 
     for box in sorted_boxes:
       conf = float(box.conf[0])
-      if conf < 0.76:
+      if conf < 0.76:  # 保留你的 0.76 設定
         continue
 
       cls_id = int(box.cls[0])
@@ -131,21 +118,27 @@ class ObjDetectNode(Node):
       if (box_area / (self.image_width * self.image_height)) > self.max_box_area_ratio:
         continue
 
-      # === 只有確認這是一個有效的目標後，我們才花費 CPU 資源去做深度對齊 ===
-      aligned_frames = self.align.process(frames)
-      depth_frame = aligned_frames.get_depth_frame()
-      if not depth_frame:
-          continue
-
       cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-      depth = depth_frame.get_distance(cx, cy)
-
-      if depth < 0.01 or depth > 4.0:
+      
+      depth_mm = depth_image[cy, cx]
+      if depth_mm == 0:  # 0 代表深度感測器破圖沒測到
+        continue
+      
+      Zc = depth_mm / 1000.0
+      if Zc < 0.01 or Zc > 4.0:
         continue
 
+      #  手動進行 3D 座標轉換 (取代原本 pyrealsense2 的 deproject 函式)
+      fx = self.intrinsics.k[0]
+      fy = self.intrinsics.k[4]
+      ppx = self.intrinsics.k[2]
+      ppy = self.intrinsics.k[5]
+      
+      Xc = (cx - ppx) * Zc / fx
+      Yc = (cy - ppy) * Zc / fy
+
       # 座標計算與平滑
-      p_cam = rs.rs2_deproject_pixel_to_point(self.intrinsics, [cx, cy], depth)
-      ground_x, ground_y, target_z = self.calculate_camera_ground_position(p_cam)
+      ground_x, ground_y, target_z = self.calculate_camera_ground_position(Xc, Yc, Zc)
       
       robo_x = ground_x + self.robo_offset_x
       robo_y = ground_y + self.robo_offset_y
@@ -169,21 +162,20 @@ class ObjDetectNode(Node):
 
       self.publisher_.publish(target_msg)
 
-      self.get_logger().info(f'✅ 發布 [{class_name}] -> X:{smoothed_x:.2f}m, Y:{smoothed_y:.2f}m')
-      
+      self.get_logger().info(f'發布 [{class_name}] -> X:{smoothed_x:.2f}m, Y:{smoothed_y:.2f}m')
       target_found = True
 
-      # UI 繪製 (僅在開啟 Debug 模式時才浪費資源去畫)
+      # UI 繪製
       if self.enable_debug_view:
-          depth_colormap = np.asanyarray(self.colorizer.colorize(depth_frame).get_data())
+          # 取代 rs.colorizer()，用 OpenCV 產生深度熱力圖
+          depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
           cv2.circle(depth_colormap, (cx, cy), 5, (255, 255, 255), -1)
           cv2.rectangle(color_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
           cv2.putText(color_image, f'{class_name} {conf:.2f}', (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
           cv2.putText(color_image, f'X: {smoothed_x:.2f}m, Y: {smoothed_y:.2f}m', (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
           cv2.imshow('ObjDetectNode - Depth Debug', depth_colormap)
 
-      # 優化：我們只需要追蹤畫面上信心度最高的那個目標，處理完直接跳出迴圈，防止陣列錯亂
-      break
+      break # 只處理信心度最高的一個
 
     # 顯示主畫面 (僅 Debug 模式)
     if self.enable_debug_view:
@@ -191,7 +183,6 @@ class ObjDetectNode(Node):
         cv2.waitKey(1)
 
   def destroy_node(self):
-    self.pipeline.stop()
     if self.enable_debug_view:
         cv2.destroyAllWindows()
     super().destroy_node()
