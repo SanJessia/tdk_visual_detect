@@ -1,0 +1,21 @@
+{
+	"folders": [
+		{
+			"name": "tdk_ws",
+			"path": "."
+		},
+		{
+			"name": "tdk_first_mission.v5i.yolov11",
+			"path": "../Downloads/tdk_first_mission.v5i.yolov11"
+		},
+		{
+			"path": "../Downloads/tdk_first_mission.v6i.yolov11"
+		},
+		{
+			"path": "../Downloads/tdk_first_mission.v7i.yolov11"
+		}
+	],
+	"settings": {
+		"stm32cube-ide-clangd.path": "cube"
+	}
+}

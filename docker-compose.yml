@@ -1,0 +1,15 @@
+services:
+  dev_container:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tdk_dev_env
+    volumes:
+      - .:/workspace #open in workspace
+    tty: true          # 強制分配虛擬終端機
+    stdin_open: true   # 保持標準輸入開啟
+    privileged: true   # 取得硬體存取權限 (開發時常用)
+    devices:
+      - "/dev/ttyUSB0:/dev/ttyUSB0" # 將 USB 裝置對應至容器內
+    # 在 docker-compose.yml 的服務區塊下加入：
+    user: "${UID}:${GID}"
