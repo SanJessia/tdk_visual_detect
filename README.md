@@ -478,6 +478,7 @@ z
 * [ ] YOLO `best.pt` 權重檔已放置正確
 * [ ] ROS 2 Package 編譯成功
 * [ ] `ros2 run obj_detect_node detect_node` 可以正常啟動
+* [ ] `ros2 run realsense2_camera realsense2_camera_node --ros-args -p align_depth.enable:=true` 可以正常啟動
 * [ ] YOLO 偵測結果正常
 * [ ] 目標深度資料正常
 * [ ] 3D 座標方向正確
